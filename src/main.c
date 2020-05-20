@@ -71,6 +71,7 @@ static int head_cir_buf;
 static int num_queued_entries;
 
 static struct k_delayed_work cloud_config_get_work;
+static struct k_delayed_work cloud_connect_work;
 static struct k_delayed_work cloud_config_send_work;
 static struct k_delayed_work cloud_data_send_work;
 static struct k_delayed_work cloud_buff_data_send_work;
@@ -126,7 +127,10 @@ static void lte_evt_handler(const struct lte_lc_evt *const evt)
 			evt->nw_reg_status == LTE_LC_NW_REG_REGISTERED_HOME ?
 			"Connected to home network" : "Connected to roaming network");
 
-		k_sem_give(&cloud_conn_sem);
+		date_time_update();
+
+		k_delayed_work_submit(&cloud_connect_work, K_SECONDS(30));
+
 		break;
 	case LTE_LC_EVT_PSM_UPDATE:
 		LOG_DBG("PSM parameter update: TAU: %d, Active time: %d",
@@ -461,6 +465,16 @@ static void cloud_btn_send_work_fn(struct k_work *work)
 	cloud_btn_send();
 }
 
+static void cloud_connect_work_fn(struct k_work *work)
+{
+	int err;
+
+	err = cloud_connect(cloud_backend);
+	if (err) {
+		LOG_ERR("cloud_connect failed: %d", err);
+	}
+}
+
 static void mov_timeout_work_fn(struct k_work *work)
 {
 	if (!cloud_data.active) {
@@ -481,6 +495,7 @@ static void work_init(void)
 	k_delayed_work_init(&led_device_mode_set_work, led_device_mode_set_work_fn);
 	k_delayed_work_init(&mov_timeout_work, mov_timeout_work_fn);
 	k_delayed_work_init(&cloud_btn_send_work, cloud_btn_send_work_fn);
+	k_delayed_work_init(&cloud_connect_work, cloud_connect_work_fn);
 }
 
 static void gps_trigger_handler(struct device *dev, struct gps_event *evt)
@@ -600,94 +615,6 @@ void cloud_event_handler(const struct cloud_backend *const backend,
 	}
 }
 
-void cloud_poll(void)
-{
-	int err;
-	int cloud_connect_retries = 0;
-	int retry_backoff_s = 0;
-
-	k_sem_take(&cloud_conn_sem, K_FOREVER);
-
-connect:
-
-	if (cloud_connect_retries >= CONFIG_CLOUD_RECONNECT_RETRIES) {
-		LOG_ERR("Too many cloud connect retires, reboot");
-		error_handler(-EIO);
-	}
-
-	/* Exponential backoff in case of disconnect from
-	 * cloud.
-	 */
-
-	retry_backoff_s = 10 + pow(cloud_connect_retries, 4);
-	cloud_connect_retries++;
-
-	LOG_INF("Trying to connect to cloud in %d seconds",
-		retry_backoff_s);
-
-	date_time_update();
-
-	k_sleep(K_SECONDS(retry_backoff_s));
-
-	err = cloud_connect(cloud_backend);
-	if (err) {
-		LOG_ERR("cloud_connect failed: %d", err);
-		goto connect;
-	}
-
-	cloud_connect_retries++;
-
-	struct pollfd fds[] = { { .fd = cloud_backend->config->socket,
-				  .events = POLLIN } };
-
-	while (true) {
-		err = poll(fds, ARRAY_SIZE(fds),
-			   cloud_keepalive_time_left(cloud_backend));
-
-		if (err < 0) {
-			LOG_ERR("poll, error: %d", err);
-			error_handler(err);
-			continue;
-		}
-
-		if (err == 0) {
-			cloud_ping(cloud_backend);
-			LOG_INF("Cloud ping!");
-			continue;
-		}
-
-		if ((fds[0].revents & POLLIN) == POLLIN) {
-			cloud_input(cloud_backend);
-		}
-
-		if ((fds[0].revents & POLLNVAL) == POLLNVAL) {
-			LOG_ERR("Socket error: POLLNVAL");
-			LOG_ERR("The cloud socket was unexpectedly closed.");
-			error_handler(-EIO);
-			return;
-		}
-
-		if ((fds[0].revents & POLLHUP) == POLLHUP) {
-			LOG_ERR("Socket error: POLLHUP");
-			LOG_ERR("Connection was closed by the cloud.");
-			LOG_ERR("TRYING TO RECONNECT...");
-			break;
-		}
-
-		if ((fds[0].revents & POLLERR) == POLLERR) {
-			LOG_ERR("Socket error: POLLERR");
-			LOG_ERR("Cloud connection was unexpectedly closed.");
-			error_handler(-EIO);
-			return;
-		}
-	}
-
-	cloud_disconnect(cloud_backend);
-	goto connect;
-}
-
-K_THREAD_DEFINE(cloud_poll_thread, CONFIG_CLOUD_POLL_STACKSIZE, cloud_poll,
-		NULL, NULL, NULL, CONFIG_CLOUD_POLL_PRIORITY, 0, K_NO_WAIT);
 
 static void modem_rsrp_handler(char rsrp_value)
 {
@@ -760,7 +687,7 @@ static void button_handler(u32_t button_states, u32_t has_changed)
 
 #if defined(CONFIG_BOARD_NRF9160_PCA10090NS)
 	/* Fake motion. The nRF9160 DK does not have an accelerometer by
-	 * default. Reset accelerometer data.
+	 * default.
 	 */
 	if (has_changed & button_states & DK_BTN2_MSK) {
 		k_sem_give(&accel_trig_sem);
