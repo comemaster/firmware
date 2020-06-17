@@ -219,7 +219,7 @@ static void accelerometer_buffer_populate(
          *  values in the circular buffer.
 	 */
 	if (k_uptime_get() - buf_entry_try_again_timeout >
-		K_SECONDS(CONFIG_TIME_BETWEEN_ACCELEROMETER_BUFFER_STORE_SEC)) {
+		MSEC_PER_SEC * CONFIG_TIME_BETWEEN_ACCELEROMETER_BUFFER_STORE_SEC) {
 
 		/** Populate the next available unqueued entry. */
 		for (k = 0; k < ARRAY_SIZE(accel_buf); k++) {
@@ -1112,7 +1112,7 @@ connect:
 }
 
 K_THREAD_DEFINE(cloud_poll_thread, CONFIG_CLOUD_POLL_STACKSIZE, cloud_poll,
-		NULL, NULL, NULL, CONFIG_CLOUD_POLL_PRIORITY, 0, K_NO_WAIT);
+		NULL, NULL, NULL, CONFIG_CLOUD_POLL_PRIORITY, 0, 0);
 
 static void modem_rsrp_handler(char rsrp_value)
 {
@@ -1163,7 +1163,7 @@ static void button_handler(u32_t button_states, u32_t has_changed)
 	 * to 1 push every 2 seconds to avoid spamming the cloud socket.
 	 */
 	if ((has_changed & button_states & DK_BTN1_MSK) &&
-	    k_uptime_get() - try_again_timeout > K_SECONDS(2)) {
+	    k_uptime_get() - try_again_timeout > MSEC_PER_SEC*2) {
 		LOG_INF("Cloud publication by button 1 triggered, ");
 		LOG_INF("2 seconds to next allowed cloud publication ");
 		LOG_INF("triggered by button 1");
@@ -1351,7 +1351,7 @@ void main(void)
 
 		/** Start GPS search, disable GPS if gpst is set to 0. */
 		if (cfg.gpst > 0) {
-			gps_control_start(K_NO_WAIT, cfg.gpst);
+			gps_control_start(0, cfg.gpst);
 
 			/*Wait for GPS search timeout*/
 			k_sem_take(&gps_timeout_sem, K_FOREVER);
